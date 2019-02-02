@@ -51,9 +51,7 @@ def warn(msg, T):
 	print_lock.release()
 
 def warning(msg, T):
-	print_lock.acquire()
-	Logger.log(WARNING, msg, **_pack_T(T))
-	print_lock.release()
+	warn(msg, T)
 
 def debug(msg, T):
 	print_lock.acquire()

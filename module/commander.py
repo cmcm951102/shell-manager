@@ -8,6 +8,8 @@ import sys
 sys.path.append('../')
 from utils import log
 from Queue import Queue
+reload(sys)
+sys.setdefaultencoding(sys.getfilesystemencoding())
 
 class Commander():
 	def __init__(self,  server, commander_listen_address):
@@ -16,7 +18,7 @@ class Commander():
 		self.conn=None
 		self.conn_lock=Lock()
 		self.socket=None
-		self.command_prompt='>>'
+		self.command_prompt='>'
 		self.CLEAN_INTERVAL_TIME=5
 
 		self.buf=''
@@ -44,10 +46,12 @@ class Commander():
 
 	def _console(self):
 		while True:
-			command=raw_input('[%s]%s'%(self.server.info('t br'),self.command_prompt)).strip()
+			try:
+				command = raw_input('[%s]%s'%(self.server.info('t br'),self.command_prompt)).strip()
+			except (EOFError,KeyboardInterrupt):
+				command = "q"
 			self.command_queue.put(command)
 			self.server.waitExecute()
-
 
 	def _listen(self):
 		self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -81,6 +85,9 @@ class Commander():
 		return self.command_queue.get()
 
 	def sendResult(self,result):
+		print '%s'%result
+		sys.stdout.flush()
+		sys.stderr.flush()
 		if self.conn != None:
 			self.conn_lock.acquire()
 			try:
@@ -92,4 +99,6 @@ class Commander():
 				succ = False
 			finally:
 				self.conn_lock.release()
-		print '%s'%result
+		# sleep(0.2)
+		self.server.notifyExecuted()
+		

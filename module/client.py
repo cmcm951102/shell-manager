@@ -4,13 +4,11 @@
 import sys
 sys.path.append('../')
 from utils import log
+from coder import comm_encode,res_decode
 from time import sleep
 import socket
-import string
-import random
+import re
 
-def random_string(length, chars=(string.letters + string.digits)):
-    return "".join([random.choice(chars) for i in range(length)])
 
 class Client():
 	def __init__(self, client_address, client_conn):
@@ -20,23 +18,36 @@ class Client():
 		self.conn = client_conn
 		self.os = None
 
-	def recvall(self, max_null_times = 3):
+
+	def recvall(self, timeout = None):
 		result = ''
-		null_time = 0
+		self.conn.settimeout(timeout)
 		while True:
 			try:
 				tmp = self.conn.recv(1024)
 				if tmp == '':
-					null_time += 1
-					if null_time > max_null_times:
-						raise IOError('recv error')
-					else:
-						continue
+					raise IOError("client lost")
 				result += tmp
-				if len(tmp) < 1024:
-					break
 			except socket.error:
 				break
+		self.conn.settimeout(None)
+		return result
+
+	def recvuntil(self, pattern, timeout = None):
+		result = ''
+		self.conn.settimeout(timeout)
+		while True:
+			try:
+				tmp = self.conn.recv(1)
+				if tmp == '':
+					raise IOError
+				result += tmp
+				if len(re.findall(pattern,result))>0:
+					break
+			except socket.error:
+				log.waring('(%s:%s)timeout! return'%(self.host,self.port), __name__)
+				break
+		self.conn.settimeout(None)
 		return result
 
 	def info(self):
@@ -50,42 +61,43 @@ class Client():
 		except:
 			return False
 
-	def runCommand(self, command):
-		tag=random_string(8)
-		command='echo %s && %s && echo %s'%(tag,command.strip(),tag)
+	def runCommand(self, command, timeout = 3):
+		command, tag=comm_encode(command)
 		log.debug('(%s:%s)raw command:%s'%(self.host,self.port, command), __name__)
-		#clear the pipe
+		#clear the pipe prepare to recv execute result
 		try:
-			self.conn.settimeout(0.5)
-			self.recvall()
-		except IOError:
-			log.debug('(%s:%s)clear error!'%(self.host,self.port), __name__)
-		except socket.error:
+			res = self.recvall(timeout=0)
 			log.debug('(%s:%s)clear over!'%(self.host,self.port), __name__)
-		finally:
-			self.conn.settimeout(self.EXECUTE_TIMEOUT)
-
+		except IOError as e:
+			log.debug('(%s:%s)clear error! %s'%(self.host,self.port,e.message), __name__)
+		
 		try:
+			log.debug('(%s:%s)send command'%(self.host,self.port), __name__)
 			self.conn.sendall(command + '\n')
 		except Exception as e:
 			log.error('(%s:%s)connect lost!'%(self.host,self.port), __name__)
 			return '[error]'
 
-		sleep(0.5)
 		try:
-			result = self.recvall()
+			log.debug('(%s:%s)recv result'%(self.host,self.port), __name__)
+			result = self.recvuntil(r"%s[\s\S]*%s"%(tag,tag),timeout=timeout)
+			if result.startswith(command):   #sometimes client repeat command back ,so we try to recv really result now
+				result = self.recvuntil(r"%s[\s\S]*%s"%(tag,tag),timeout=timeout)
+			if result== None:
+				return '[error]'
 		except IOError:
-			log.error('(%s:%s)recv error!'%(self.host,self.port), __name__)
-		finally:
-			if result.strip().startswith(command):
-				result=result.replace(command, '')
-			if len(result.split(tag)) == 3:
-				result = result.split(tag)[1].strip()
-			else:
-				log.warning('(%s:%s)execute failed'%(self.host,self.port), __name__)
-				log.debug('(%s:%s)raw result:\n%s'%(self.host,self.port,result), __name__)
-				result = '[error]'
-			return result
+			log.error('(%s:%s)recv error, client lost!'%(self.host,self.port), __name__)
+			return '[error]'
+
+		try:
+			result=res_decode(result,tag)
+		except Exception as e:
+			log.warning('(%s:%s)execute failed'%(self.host,self.port), __name__)
+			log.debug('(%s:%s)[decode exception]%s'%(self.host,self.port,e.message), __name__)
+			sys.stdout.flush()
+			sys.stderr.flush()
+			return '[error]'
+		return result
 
 	def __str__(self):
 		return '%s:%s(%s)'%(self.host, self.port, self.os)
